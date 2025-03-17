@@ -1,4 +1,5 @@
 import httpx
+import asyncio
 from typing import List, Optional, Dict, Any
 import os
 from helpers.embeddings import generate_embedding, calculate_cosine_similarity, combine_texts_for_embedding
@@ -129,6 +130,52 @@ def generate_missing_info_suggestions(article: Dict[str, Any], topic: str) -> Li
         
     return missing_info
 
+async def process_search_result(result: Dict[str, Any], topic: str, user_embedding: List[float]) -> Optional[Dict[str, Any]]:
+    """Process a single search result and return article details if it's a valid stub."""
+    try:
+        categories = await get_article_categories(result['title'])
+        is_stub = any(
+            'stub' in cat.lower() or 
+            ('article' in cat.lower() and 'quality' in cat.lower())
+            for cat in categories
+        )
+        
+        if is_stub:
+            details = await get_article_details(result['title'])
+            if details:
+                article_text = combine_texts_for_embedding({
+                    'title': details['title'],
+                    'content': details['extract'],
+                    'categories': ', '.join(details['categories'])
+                })
+                
+                article_embedding = await generate_embedding(article_text)
+                similarity = calculate_cosine_similarity(user_embedding, article_embedding)
+                
+                return {
+                    **details,
+                    'embedding': article_embedding,
+                    'relevanceScore': similarity,
+                    'missingInfo': generate_missing_info_suggestions(details, topic),
+                }
+    except Exception as e:
+        print(f"Error processing search result {result['title']}: {e}")
+    return None
+
+async def process_topic(topic: str, user_embedding: List[float]) -> List[Dict[str, Any]]:
+    """Process a single topic and return its search results."""
+    try:
+        search_results = await search_wikipedia(f"{topic} stub", 5)
+        # Process all search results for this topic in parallel
+        results = await asyncio.gather(
+            *[process_search_result(result, topic, user_embedding) for result in search_results]
+        )
+        # Filter out None results
+        return [r for r in results if r is not None]
+    except Exception as e:
+        print(f"Error processing topic {topic}: {e}")
+        return []
+
 async def find_relevant_stub_articles(topics: List[str], text: str, limit: int = 10) -> List[Dict[str, Any]]:
     """Find most relevant stub articles based on user expertise using embeddings."""
     # Prepare user expertise text for embedding
@@ -141,39 +188,23 @@ async def find_relevant_stub_articles(topics: List[str], text: str, limit: int =
     # Generate embedding for user expertise
     user_embedding = await generate_embedding(user_expertise_text)
     
+    # Process all topics in parallel
+    all_results_nested = await asyncio.gather(
+        *[process_topic(topic, user_embedding) for topic in topics]
+    )
+    
+    # Flatten results and remove duplicates based on title
+    seen_titles = set()
     all_results = []
+    for results in all_results_nested:
+        for result in results:
+            if result['title'] not in seen_titles:
+                seen_titles.add(result['title'])
+                all_results.append(result)
     
-    # Search by topics
-    for topic in topics:
-        search_results = await search_wikipedia(f"{topic} stub", 5)
-        
-        for result in search_results:
-            categories = await get_article_categories(result['title'])
-            is_stub = any(
-                'stub' in cat.lower() or 
-                ('article' in cat.lower() and 'quality' in cat.lower())
-                for cat in categories
-            )
-            
-            if is_stub:
-                details = await get_article_details(result['title'])
-                if details:
-                    # Get article embedding using combined text
-                    article_text = combine_texts_for_embedding({
-                        'title': details['title'],
-                        'content': details['extract'],
-                        'categories': ', '.join(details['categories'])
-                    })
-                    
-                    article_embedding = await generate_embedding(article_text)
-                    similarity = calculate_cosine_similarity(user_embedding, article_embedding)
-                    
-                    all_results.append({
-                        **details,
-                        'embedding': article_embedding,
-                        'relevanceScore': similarity,
-                        'missingInfo': generate_missing_info_suggestions(details, topic),
-                    })
+    # Sort by relevance (similarity score) and take the top results
+    all_results.sort(key=lambda x: x['relevanceScore'], reverse=True)
     
-    # Sort results by relevance score and return top results
-    return sorted(all_results, key=lambda x: x['relevanceScore'], reverse=True)[:limit] 
+    # Remove embeddings before returning
+    return [{k: v for k, v in result.items() if k != 'embedding'} 
+            for result in all_results[:limit]] 

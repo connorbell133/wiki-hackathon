@@ -1,8 +1,8 @@
 'use client';
 
 import { useState } from 'react';
-import { useDropzone } from 'react-dropzone';
-import Image from 'next/image';
+import { useDropzone, FileRejection } from 'react-dropzone';
+import { api } from '@/lib/api';
 
 // Predefined categories for users to select from
 const PREDEFINED_CATEGORIES = [
@@ -11,6 +11,13 @@ const PREDEFINED_CATEGORIES = [
   'Economics', 'Mathematics', 'Biology', 'Physics', 'Chemistry',
   'Computer Science', 'Medicine', 'Architecture', 'Psychology', 'Sociology'
 ];
+
+interface FileProcessingResult {
+  text: string;
+  preview: string;
+  total_length: number;
+  file_type: string;
+}
 
 interface InputFormProps {
   onSubmit: (data: { topics: string[]; text: string }) => void;
@@ -21,27 +28,63 @@ export default function InputForm({ onSubmit, isLoading = false }: InputFormProp
   const [selectedTopics, setSelectedTopics] = useState<string[]>([]);
   const [freeText, setFreeText] = useState('');
   const [fileContent, setFileContent] = useState('');
+  const [filePreview, setFilePreview] = useState('');
   const [activeTab, setActiveTab] = useState<'topics' | 'text' | 'file'>('topics');
+  const [fileError, setFileError] = useState<string | null>(null);
+  const [isProcessingFile, setIsProcessingFile] = useState(false);
+  const [fileInfo, setFileInfo] = useState<{ type: string; size: number } | null>(null);
 
   // Configure dropzone for resume uploads
   const { getRootProps, getInputProps, isDragActive } = useDropzone({
     accept: {
       'text/plain': ['.txt'],
       'application/pdf': ['.pdf'],
-      'application/msword': ['.doc'],
       'application/vnd.openxmlformats-officedocument.wordprocessingml.document': ['.docx']
     },
+    maxSize: 5 * 1024 * 1024, // 5MB
     multiple: false,
-    onDrop: (acceptedFiles) => {
+    onDropRejected: (rejectedFiles: FileRejection[]) => {
+      const file = rejectedFiles[0];
+      if (file.file.size > 5 * 1024 * 1024) {
+        setFileError('File size exceeds 5MB limit');
+      } else {
+        setFileError('Invalid file type. Please upload a PDF, DOCX, or TXT file.');
+      }
+    },
+    onDrop: async (acceptedFiles) => {
       const file = acceptedFiles[0];
-      const reader = new FileReader();
+      setFileError(null);
+      setIsProcessingFile(true);
+      setFileInfo({ type: file.type, size: file.size });
       
-      reader.onload = () => {
-        const content = reader.result as string;
-        setFileContent(content);
-      };
-      
-      reader.readAsText(file);
+      try {
+        // Create form data
+        const formData = new FormData();
+        formData.append('file', file);
+        
+        // Send file to backend for processing
+        const response = await fetch(`${process.env.NEXT_PUBLIC_API_URL}/process-file`, {
+          method: 'POST',
+          body: formData,
+        });
+        
+        if (!response.ok) {
+          const error = await response.json();
+          throw new Error(error.detail || 'Error processing file');
+        }
+        
+        const data: FileProcessingResult = await response.json();
+        setFileContent(data.text);
+        setFilePreview(data.preview);
+      } catch (error) {
+        console.error('Error processing file:', error);
+        setFileError(error instanceof Error ? error.message : 'Error processing file. Please try again.');
+        setFileContent('');
+        setFilePreview('');
+        setFileInfo(null);
+      } finally {
+        setIsProcessingFile(false);
+      }
     }
   });
 
@@ -72,6 +115,12 @@ export default function InputForm({ onSubmit, isLoading = false }: InputFormProp
       topics, 
       text: combinedText 
     });
+  };
+
+  const formatFileSize = (bytes: number): string => {
+    if (bytes < 1024) return bytes + ' B';
+    if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
+    return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
   };
 
   return (
@@ -154,21 +203,54 @@ export default function InputForm({ onSubmit, isLoading = false }: InputFormProp
                 : 'border-gray-300 dark:border-gray-700'
               }
               ${fileContent ? 'bg-green-50 dark:bg-green-900/20 border-green-500' : ''}
+              ${fileError ? 'bg-red-50 dark:bg-red-900/20 border-red-500' : ''}
             `}
           >
             <input {...getInputProps()} />
             
-            {fileContent ? (
+            {fileError ? (
+              <div className="text-red-600 dark:text-red-400">
+                <svg className="mx-auto h-12 w-12 mb-2" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                </svg>
+                <p>{fileError}</p>
+                <button 
+                  type="button"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setFileError(null);
+                  }}
+                  className="mt-2 text-sm underline"
+                >
+                  Try again
+                </button>
+              </div>
+            ) : isProcessingFile ? (
+              <div className="text-blue-600 dark:text-blue-400">
+                <svg className="animate-spin mx-auto h-12 w-12 mb-2" viewBox="0 0 24 24">
+                  <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" />
+                  <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
+                </svg>
+                <p>Processing file...</p>
+              </div>
+            ) : fileContent ? (
               <div className="text-green-600 dark:text-green-400">
                 <svg className="mx-auto h-12 w-12 mb-2" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
                 </svg>
                 <p>Resume uploaded successfully!</p>
+                {fileInfo && (
+                  <p className="mt-1 text-sm">
+                    {fileInfo.type.split('/')[1].toUpperCase()} • {formatFileSize(fileInfo.size)}
+                  </p>
+                )}
                 <button 
                   type="button"
                   onClick={(e) => {
                     e.stopPropagation();
                     setFileContent('');
+                    setFilePreview('');
+                    setFileInfo(null);
                   }}
                   className="mt-2 text-sm underline"
                 >
@@ -184,11 +266,21 @@ export default function InputForm({ onSubmit, isLoading = false }: InputFormProp
                   Drag and drop your resume, or click to select a file
                 </p>
                 <p className="mt-1 text-xs text-gray-500 dark:text-gray-500">
-                  Supported formats: TXT, PDF, DOC, DOCX
+                  Supported formats: PDF, DOCX, TXT (max 5MB)
                 </p>
               </>
             )}
           </div>
+          
+          {/* File Preview */}
+          {filePreview && (
+            <div className="mt-4 p-4 bg-gray-50 dark:bg-gray-900 rounded-md">
+              <h3 className="text-sm font-medium mb-2">Preview:</h3>
+              <p className="text-sm text-gray-600 dark:text-gray-400 whitespace-pre-line">
+                {filePreview}
+              </p>
+            </div>
+          )}
         </div>
       )}
       
@@ -196,7 +288,7 @@ export default function InputForm({ onSubmit, isLoading = false }: InputFormProp
       <div className="mt-6">
         <button
           type="submit"
-          disabled={isLoading || (
+          disabled={isLoading || isProcessingFile || (
             activeTab === 'topics' ? selectedTopics.length === 0 :
             activeTab === 'text' ? !freeText.trim() :
             !fileContent
